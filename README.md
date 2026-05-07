@@ -51,6 +51,42 @@ It is important to specify `-fvk-use-c-layout` to `slangc` or set
 `CompilerOptionName::ForceCLayout = true` in the API. This ensures that the
 memory layout is matched between Slang and C/C++.
 
+## CMake integration
+
+This is a brief example of how to use `slang-bindgen` as part of a CMake build
+setup, so that bindings are generated during build time:
+
+```cmake
+# You can add this repo as a git submodule in your project, and then add it as a
+# subdirectory in CMake.
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/external/path/to/slang-bindgen")
+
+find_package(Vulkan REQUIRED)
+add_custom_command(
+    OUTPUT vulkan.slang
+    COMMAND slang-bindgen
+        ${Vulkan_INCLUDE_DIRS}/vulkan/vulkan.h
+        ${Vulkan_INCLUDE_DIRS}/vulkan/vk_platform.h
+        ${Vulkan_INCLUDE_DIRS}/vulkan/vulkan_core.h
+        ${Vulkan_INCLUDE_DIRS}/vk_video/vulkan_video_codec_h264std.h
+        ${Vulkan_INCLUDE_DIRS}/vk_video/vulkan_video_codec_h264std_encode.h
+        ${Vulkan_INCLUDE_DIRS}/vk_video/vulkan_video_codec_h264std_decode.h
+        ${Vulkan_INCLUDE_DIRS}/vk_video/vulkan_video_codec_h265std.h
+        ${Vulkan_INCLUDE_DIRS}/vk_video/vulkan_video_codec_h265std_encode.h
+        ${Vulkan_INCLUDE_DIRS}/vk_video/vulkan_video_codec_h265std_decode.h
+        --rm-enum-prefix ".*"
+        --fallback-prefix _
+        --rm-enum-case VK_COLORSPACE_SRGB_NONLINEAR_KHR
+        --output vulkan.slang
+        --
+        -Dsize_t=uintptr_t
+    COMMENT "Generating Vulkan bindings"
+)
+add_custom_target(vulkan-bindings DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/vulkan.slang)
+
+add_dependencies(your-shader-or-program-build-target vulkan-bindings)
+```
+
 ## How it's made
 
 This section is only relevant to you if you are planning to modify the binding
