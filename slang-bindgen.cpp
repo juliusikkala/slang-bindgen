@@ -524,8 +524,6 @@ struct ClangSession
         std::vector<const char*> argsToClang;
 
         argsToClang.push_back("clang");
-        for (auto& arg: options.forwardedArgsToClang)
-            argsToClang.push_back(arg.c_str());
         argsToClang.push_back("-w");
         // Add some fake job to dig out the system library directories from 
         // Clang :/
@@ -536,6 +534,8 @@ struct ClangSession
         argsToClang.push_back("-target");
         argsToClang.push_back(options.targetTriple.c_str());
         argsToClang.push_back("-std=c++20");
+        for (auto& arg: options.forwardedArgsToClang)
+            argsToClang.push_back(arg.c_str());
 
         comp.reset(driver->BuildCompilation(argsToClang));
 
@@ -771,8 +771,11 @@ std::string getTypeStr(BindingContext& ctx, clang::QualType qualType, bool omitQ
     if (const clang::TypedefType* typedefType = type.getAs<clang::TypedefType>())
     {
         clang::TypedefNameDecl* decl = typedefType->getDecl();
+        std::string ident = decl->getName().str();
+        if (options.translateTypes.count(ident))
+            return options.translateTypes[ident];
         // Use typedef names if the decl is visible, those should exist.
-        if (isLocationVisible(ctx, decl->getLocation()) || isNameActive(decl))
+        else if (isLocationVisible(ctx, decl->getLocation()) || isNameActive(decl))
             return decl->getName().str();
         // Otherwise, continue with the canonical type.
     }
@@ -863,26 +866,29 @@ std::string getTypeStr(BindingContext& ctx, clang::QualType qualType, bool omitQ
 
         if (options.translateTypes.count(ident))
             ident = options.translateTypes[ident];
-
-        // If this type is not defined in the headers we're generating the
-        // bindings for, we'll need to cover it somehow else.
-        bool visible = isLocationVisible(ctx, decl->getLocation());
-
-        if (!visible && type.isRecordType())
+        else
         {
-            // Add a forward declare for structs and unions.
-            ctx.addTypeForwardDeclare(ident);
-        }
+            // If this type is not defined in the headers we're generating the
+            // bindings for, we'll need to cover it somehow else.
+            bool visible = isLocationVisible(ctx, decl->getLocation());
 
-        if (type.isEnumeralType() && (!visible || ident.empty() || isConstantifiedEnum(ident)))
-        {
-            // Use the underlying type for anonymous or externally defined enums.
-            clang::EnumDecl* enumDecl = clang::cast<clang::EnumDecl>(decl);
-            ident = getTypeStr(ctx, enumDecl->getIntegerType(), true);
+            if (!visible && type.isRecordType())
+            {
+                // Add a forward declare for structs and unions.
+                ctx.addTypeForwardDeclare(ident);
+            }
+
+            if (type.isEnumeralType() && (!visible || ident.empty() || isConstantifiedEnum(ident)))
+            {
+                // Use the underlying type for anonymous or externally defined enums.
+                clang::EnumDecl* enumDecl = clang::cast<clang::EnumDecl>(decl);
+                ident = getTypeStr(ctx, enumDecl->getIntegerType(), true);
+            }
         }
         return qualifier + ident;
     }
     assert(false);
+    abort();
 }
 
 void dumpDecl(BindingContext& ctx, clang::Decl* decl, bool topLevel);
@@ -1240,13 +1246,16 @@ void dumpRecord(
     const std::string& fallbackName)
 {
     clang::CXXRecordDecl* cxxRecord = clang::cast_or_null<clang::CXXRecordDecl>(decl);
-    // Inheritance is not supported.
-    if (cxxRecord && cxxRecord->getNumBases() != 0)
-        return;
+    if (cxxRecord && cxxRecord->hasDefinition())
+    {
+        // Inheritance is not supported.
+        if (cxxRecord->getNumBases() != 0)
+            return;
 
-    // Vtables are not supported.
-    if (cxxRecord && cxxRecord->isPolymorphic() != 0)
-        return;
+        // Vtables are not supported.
+        if (cxxRecord->isPolymorphic() != 0)
+            return;
+    }
 
     std::optional<std::string> maybeName = maybeGetName(decl);
     if (!maybeName.has_value() && !fallbackName.empty())
@@ -1579,6 +1588,31 @@ void dumpVar(BindingContext& ctx, clang::VarDecl* decl)
         dumpExternVar(ctx, decl);
 }
 
+void dumpNamespace(BindingContext& ctx, clang::NamespaceDecl* decl)
+{
+    std::string name = 
+        decl->isAnonymousNamespace() ? "" : maybeGetName(decl).value_or("");
+
+    if (name.size() != 0)
+    {
+        ctx.output("namespace %s {", name.c_str());
+        ctx.indentLevel++;
+    }
+
+    for (clang::Decl* singleDecl: decl->decls())
+    {
+        if (!isLocationActive(ctx, singleDecl->getLocation()) && !isNameActive(singleDecl))
+            continue;
+        dumpDecl(ctx, singleDecl, false);
+    }
+
+    if (name.size() != 0)
+    {
+        ctx.indentLevel--;
+        ctx.output("} // namespace %s", name.c_str());
+    }
+}
+
 void dumpDecl(BindingContext& ctx, clang::Decl* decl, bool topLevel)
 {
     if (options.explicitExportOnly)
@@ -1617,6 +1651,9 @@ void dumpDecl(BindingContext& ctx, clang::Decl* decl, bool topLevel)
         break;
     case clang::Decl::Kind::Var:
         dumpVar(ctx, clang::cast<clang::VarDecl>(decl));
+        break;
+    case clang::Decl::Kind::Namespace:
+        dumpNamespace(ctx, clang::cast<clang::NamespaceDecl>(decl));
         break;
     default:
         //if (!topLevel)
